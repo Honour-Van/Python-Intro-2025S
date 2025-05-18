@@ -1,0 +1,13 @@
+langchain>=0.1.16
+langchain-community>=0.0.26
+langchain-ollama>=0.1.2
+
+chromadb>=0.4.24
+unstructured>=0.10.17
+
+pymupdf>=1.22.5             # PyPDFLoader 依赖
+python-docx>=1.1.0          # Docx2txtLoader 依赖
+docx2txt>=0.8               # 另一种 docx loader 使用的备选
+pandas>=2.0.0               # CSVLoader 依赖
+markdown                   # 如果你后续支持 .md 文件
+tqdm                       # 可选：进度条
