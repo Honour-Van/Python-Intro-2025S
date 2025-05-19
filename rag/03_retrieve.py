@@ -14,8 +14,6 @@ from langchain.prompts import PromptTemplate
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
-from langchain.output_parsers import RegexParser
-from langchain.schema.runnable import RunnableLambda
 
 
 # 忽略警告
@@ -59,12 +57,34 @@ class DocumentProcessor:
                     except Exception as e:
                         print(f"❌ 加载失败: {e}")
         return all_docs
+    
+    @classmethod
+    def load_path(cls, path: str) -> List[Document]:
+        try:
+            if os.path.isfile(path):
+                print(f"正在加载单个文档: {path}")
+                docs = cls.load_document(path)
+            else:
+                print(f"正在加载目录下的所有文档: {path}")
+                docs = cls.load_documents_from_dir(path)
+                
+            if not docs:
+                print("❌ 未找到任何支持的文档")
+                return []
+                
+            print(f"\n✅ 总共加载了 {len(docs)} 份内容")
+            return docs
+
+        except Exception as e:
+            print(f"❌ 文档加载失败: {str(e)}")
+            return []
+
 
 
 class RAGEngine:
     DEFAULT_PROMPT = """
-你是一个智能助手，擅长回答各种问题。
-你需要依据以下提供的上下文信息回答用户的问题。
+你是一个古典小说解读助手，擅长回答各种问题。
+你需要依据以下提供的上下文信息回答用户的问题。注意输出时给出原文的引用。
 如果上下文信息不足，返回“未找到参考文档”。
 
 上下文信息:
@@ -78,7 +98,7 @@ class RAGEngine:
 
     FALLBACK_PROMPT = """
 你是一个智能助手，擅长回答各种问题。
-目前没有找到与用户问题相关的具体信息，请基于你的知识进行回答。
+目前没有找到与用户问题相关的具体信息，请基于你的知识进行回答，并声明你没有找到，是根据你的知识回答的。
 
 用户问题:
 {question}
@@ -109,19 +129,6 @@ class RAGEngine:
         self.vectorstore = Chroma.from_documents(texts, embeddings)
         print("✅ 向量存储创建完成")
 
-    def init_output_parser(self):
-        # 定义正则表达式解析器，提取冒号后的内容
-        # 为什么不对？pattern = r"<think>(.*?)</think>\s*(.*)" # 默认不开DOTALL
-        deepseek_pattern = r"<think>([\s\S]*?)</think>\s*([\s\S]*)"
-        output_keys = ["thought", "answer"]
-
-        self.parser = RegexParser(
-            regex=deepseek_pattern,
-            output_keys=output_keys,
-            default_output_key="answer",
-        )
-
-
     def create_qa_chain(self):
         if self.vectorstore is None:
             raise RuntimeError("请先调用 process_documents 初始化向量存储")
@@ -131,7 +138,13 @@ class RAGEngine:
             model=self.llm_model)
 
         retriever = self.vectorstore.as_retriever(
-            search_kwargs={"k": 3}
+            search_type="mmr",  # or "similarity"
+            search_kwargs={
+                "k": 5,                 # 返回前k个相似文档
+                "score_threshold": 0.7, # 相似度分数阈值（可选，部分vectorstore支持）
+                "fetch_k": 20,          # 用于MMR时：从top-N中选择（比如先取前20个再挑5个）
+                "lambda_mult": 0.5      # MMR中控制多样性和平衡性的超参数
+            }
         )
 
         # 新版Prompt + LLM检索链
@@ -142,7 +155,7 @@ class RAGEngine:
                 ]
             )
         document_chain = create_stuff_documents_chain(llm, primary_prompt)
-        self.qa_chain = create_retrieval_chain(retriever, document_chain).pick("answer") | self.parser
+        self.qa_chain = create_retrieval_chain(retriever, document_chain)
 
         fallback_prompt = PromptTemplate(
             template=self.FALLBACK_PROMPT,
@@ -163,7 +176,9 @@ class RAGEngine:
             if result.get("context"):
                 print("\n📚 参考文档:")
                 for i, doc in enumerate(result["context"]):
-                    print(f"{i}. {os.path.basename(doc.metadata.get('source', '未知文档'))}")
+                    source = os.path.basename(doc.metadata.get("source", "未知文档"))
+                    snippet = doc.page_content[:100].replace("\n", " ") + "..."  # 显示前 100 个字符作为摘要
+                    print(f"{i}. {source}: \"{snippet}\"")
 
             if "未找到参考文档" in answer:
                 raise ValueError("未找到参考文档，调用fallback链")
@@ -190,23 +205,7 @@ def main():
     
     # 加载文档
     processor = DocumentProcessor()
-    try:
-        if os.path.isfile(path):
-            print(f"正在加载单个文档: {path}")
-            docs = processor.load_document(path)
-        else:
-            print(f"正在加载目录下的所有文档: {path}")
-            docs = processor.load_documents_from_dir(path)
-            
-        if not docs:
-            print("❌ 未找到任何支持的文档")
-            return
-            
-        print(f"\n✅ 总共加载了 {len(docs)} 份内容")
-        
-    except Exception as e:
-        print(f"❌ 文档加载失败: {str(e)}")
-        return
+    docs = processor.load_path(path)
     
     # 初始化RAG引擎
     engine = RAGEngine()
@@ -214,7 +213,6 @@ def main():
     try:
         if docs:  # 只有当有文档时才处理
             engine.process_documents(docs)
-        engine.init_output_parser()
         engine.create_qa_chain()
     except Exception as e:
         print(f"❌ 系统初始化失败: {str(e)}")
